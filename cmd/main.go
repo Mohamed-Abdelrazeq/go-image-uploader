@@ -11,12 +11,13 @@ func main() {
 
 	r.GET("/health", health)
 
-	r.POST("/upload", upload)
+	r.POST("/images", uploadImage)
+	r.GET("/images/:filename", showImage)
 
 	r.Run(":8080")
 }
 
-func upload(c *gin.Context) {
+func uploadImage(c *gin.Context) {
 	// parse image
 	file, err := c.FormFile("image")
 	if err != nil {
@@ -40,6 +41,11 @@ func upload(c *gin.Context) {
 		"message": "Image uploaded successfully",
 		"url":     "http://localhost:8080/images/" + file.Filename,
 	})
+}
+
+func showImage(c *gin.Context) {
+	filename := c.Param("filename")
+	c.File("./images/" + filename)
 }
 
 func health(c *gin.Context) {
