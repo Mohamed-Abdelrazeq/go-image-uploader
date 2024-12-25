@@ -1,23 +1,27 @@
 package main
 
 import (
-	"log"
+	"bytes"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/aws/aws-lambda-go/lambda"
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 )
 
-var (
-	s3Session *s3.S3
-	bucket    string
-)
+var s3Session *s3.S3
+var bucket string
 
-func initAWS() {
+func init() {
 	sess := session.Must(
 		session.NewSession(
 			&aws.Config{
@@ -29,66 +33,108 @@ func initAWS() {
 	bucket = os.Getenv("AWS_BUCKET_NAME")
 }
 
-func main() {
-	r := gin.Default()
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
+func handler(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	switch request.HTTPMethod {
+	case "POST":
+		return uploadImage(request)
+	case "GET":
+		if request.PathParameters["filename"] != "" {
+			return showImage(request)
+		}
+		return health()
+	default:
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusMethodNotAllowed,
+			Body:       "Method not allowed",
+		}, nil
 	}
-	initAWS()
-
-	r.GET("/health", health)
-
-	r.POST("/images", uploadImage)
-	r.GET("/images/:filename", showImage)
-
-	r.Run(":8080")
 }
-func uploadImage(c *gin.Context) {
-	file, err := c.FormFile("image")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Failed to upload image",
-		})
-		return
+
+func uploadImage(request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	contentType := request.Headers["Content-Type"]
+	if !strings.HasPrefix(contentType, "multipart/form-data") {
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusBadRequest,
+			Body:       "Invalid content type",
+		}, nil
 	}
 
-	src, err := file.Open()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to open image",
-		})
-		return
-	}
-	defer src.Close()
+	body := strings.NewReader(request.Body)
+	reader := multipart.NewReader(body, contentType[30:])
 
+	part, err := reader.NextPart()
+	if err != nil {
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusBadRequest,
+			Body:       "Invalid file",
+		}, nil
+	}
+	defer part.Close()
+
+	buf := new(bytes.Buffer)
+	_, err = buf.ReadFrom(part)
+	if err != nil {
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       "Failed to read file",
+		}, nil
+	}
+
+	filePath := filepath.Join("uploads", part.FileName())
 	_, err = s3Session.PutObject(&s3.PutObjectInput{
 		Bucket: aws.String(bucket),
-		Key:    aws.String(file.Filename),
-		Body:   src,
-		ACL:    aws.String("public-read"),
+		Key:    aws.String(filePath),
+		Body:   bytes.NewReader(buf.Bytes()),
 	})
 	if err != nil {
-		log.Println(err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "Failed to upload image to S3",
-		})
-		return
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       fmt.Sprintf("Failed to upload image: %s", err.Error()),
+		}, nil
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Image uploaded successfully",
-		"url":     "https://" + bucket + ".s3.amazonaws.com/" + file.Filename,
-	})
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Body:       "Image uploaded successfully",
+	}, nil
 }
 
-func showImage(c *gin.Context) {
-	filename := c.Param("filename")
-	c.Redirect(http.StatusMovedPermanently, "https://"+bucket+".s3.amazonaws.com/"+filename)
+func showImage(request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	fileName := request.PathParameters["filename"]
+	filePath := filepath.Join("uploads", fileName)
+
+	resp, err := s3Session.GetObject(&s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(filePath),
+	})
+	if err != nil {
+		return events.APIGatewayProxyResponse{
+			StatusCode: http.StatusInternalServerError,
+			Body:       fmt.Sprintf("Failed to retrieve image: %s", err.Error()),
+		}, nil
+	}
+	defer resp.Body.Close()
+
+	buf := new(bytes.Buffer)
+	buf.ReadFrom(resp.Body)
+	imageBase64 := base64.StdEncoding.EncodeToString(buf.Bytes())
+
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Body:       imageBase64,
+		Headers: map[string]string{
+			"Content-Type": "image/jpeg", // Adjust the content type as needed
+		},
+	}, nil
 }
 
-func health(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"message": "OK",
-	})
+func health() (events.APIGatewayProxyResponse, error) {
+	return events.APIGatewayProxyResponse{
+		StatusCode: http.StatusOK,
+		Body:       "Healthy",
+	}, nil
+}
+
+func main() {
+	lambda.Start(handler)
 }

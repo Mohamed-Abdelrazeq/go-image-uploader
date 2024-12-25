@@ -3,6 +3,7 @@ module Mohamed-Abdelrazeq/go-image-uploader
 go 1.23.2
 
 require (
+	github.com/aws/aws-lambda-go v1.47.0
 	github.com/aws/aws-sdk-go v1.55.5 // indirect
 	github.com/bytedance/sonic v1.12.4 // indirect
 	github.com/bytedance/sonic/loader v0.2.1 // indirect
